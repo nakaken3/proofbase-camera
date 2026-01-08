@@ -5,7 +5,7 @@ import { Camera, CameraResultType } from "@capacitor/camera";
 import { Geolocation } from "@capacitor/geolocation";
 import { suiAnchor } from "../src/lib/sui";
 
-// 履歴データの型定義
+// --- 型定義 ---
 interface ScanHistory {
   id: string;
   title: string;
@@ -17,7 +17,7 @@ interface ScanHistory {
   location?: { lat: number; lng: number };
 }
 
-// 共通のデザインパーツ
+// --- スタイル設定 ---
 const titleStyle = {
   textAlign: "center" as const,
   margin: "0 0 15px 0",
@@ -68,22 +68,30 @@ export default function Home() {
   const [history, setHistory] = useState<ScanHistory[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
 
+  // 初期読み込み（安全策を強化）
   useEffect(() => {
-    const saved = localStorage.getItem("proofbase_history");
-    if (saved) {
-      try {
-        setHistory(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to parse history", e);
+    try {
+      const saved = localStorage.getItem("proofbase_history");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setHistory(parsed);
+        }
       }
+    } catch (e) {
+      console.error("Load Error", e);
+      setHistory([]);
     }
   }, []);
 
-  // --- 1. カメラ・写真選択機能 ---
+  const saveHistory = (newHistory: ScanHistory[]) => {
+    setHistory(newHistory);
+    localStorage.setItem("proofbase_history", JSON.stringify(newHistory));
+  };
+
   const takePhoto = async () => {
     try {
       setLoading(true);
-      // 位置情報の取得（内部写真選択に備え、失敗しても続行）
       try {
         const pos = await Geolocation.getCurrentPosition({ timeout: 3000 });
         setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
@@ -93,12 +101,10 @@ export default function Home() {
 
       const image = await Camera.getPhoto({
         quality: 90,
-        allowEditing: false,
         resultType: CameraResultType.Base64,
-        // ここで source を指定しないことで、OS標準の「カメラかライブラリか」の選択肢が出ます
       });
 
-      if (image.base64String) {
+      if (image?.base64String) {
         setImageUrl(`data:image/${image.format};base64,${image.base64String}`);
         setPhotoTime(new Date().toLocaleString());
         const msgUint8 = new TextEncoder().encode(image.base64String);
@@ -117,26 +123,21 @@ export default function Home() {
     }
   };
 
-  // --- 2. 重複チェック & Sui刻印 ---
   const recordToSui = async () => {
     if (!hash || !imageUrl || !photoTime) return;
 
-    // タイトルの重複チェック（プレビューは維持、タイトルだけ変えてもらう）
-    const isDuplicateTitle = history.some(
-      (item) => item.title === (title || "無題の証拠")
-    );
-    if (isDuplicateTitle) {
+    if (
+      history.some((item) => item && item.title === (title || "無題の証拠"))
+    ) {
       alert("⚠️ 同じタイトルの証拠が既に存在します。");
       return;
     }
 
-    // 画像の重複チェック（この場合は「撮影を開始する」直後の選択画面に強制的に戻す）
-    const isDuplicateHash = history.some((item) => item.hash === hash);
-    if (isDuplicateHash) {
+    if (history.some((item) => item && item.hash === hash)) {
       alert("⚠️ この画像は既に刻印済みです。別の写真を選び直してください。");
-      setHash(null); // 一旦リセットして
+      setHash(null);
       setImageUrl(null);
-      takePhoto(); // ★自動で「カメラかライブラリか」の選択画面を再起動
+      takePhoto();
       return;
     }
 
@@ -153,93 +154,25 @@ export default function Home() {
         imageUrl,
         location: coords || undefined,
       };
-
-      const updated = [newEntry, ...history];
-      setHistory(updated);
-      localStorage.setItem("proofbase_history", JSON.stringify(updated));
-
-      // 成功時：データをクリアして「ホーム（撮影ボタンがある画面）」の状態に戻る
+      saveHistory([newEntry, ...history]);
       setHash(null);
       setImageUrl(null);
       setCoords(null);
       setTitle("");
       alert("✅ Suiに記録しました！");
-      // ★履歴ページへは飛ばず、Homeタブ（activeTab === "home"）のまま待機
     } catch (e: any) {
-      alert("Error: " + e.message);
+      alert(e.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // 履歴表示用コンポーネント（Home内に定義してエラーを回避）
-  const HistoryCard = ({ item }: { item: ScanHistory }) => (
-    <div
-      style={{
-        backgroundColor: "rgba(255, 255, 255, 0.7)",
-        backdropFilter: "blur(10px)",
-        borderRadius: "16px",
-        padding: "10px",
-        display: "flex",
-        gap: "12px",
-        border: "1px solid rgba(255, 255, 255, 0.4)",
-        marginBottom: "8px",
-      }}
-    >
-      <img
-        src={item.imageUrl}
-        style={{
-          width: "50px",
-          height: "50px",
-          objectFit: "cover",
-          borderRadius: "8px",
-        }}
-      />
-      <div style={{ flex: 1, minWidth: 0, fontSize: "11px" }}>
-        <div
-          style={{
-            fontWeight: "900",
-            color: "#1F2937",
-            marginBottom: "2px",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {item.title}
-        </div>
-        <div style={{ color: "#6B7280", fontSize: "10px" }}>
-          {item.photoTimestamp}
-        </div>
-        <div style={{ display: "flex", gap: "12px", marginTop: "5px" }}>
-          <a
-            href={`https://suiscan.xyz/mainnet/tx/${item.txHash}`}
-            target="_blank"
-            style={{
-              color: "#4F46E5",
-              fontWeight: "700",
-              textDecoration: "none",
-            }}
-          >
-            SuiScan ↗
-          </a>
-          {item.location && (
-            <a
-              href={`https://www.google.com/maps?q=${item.location.lat},${item.location.lng}`}
-              target="_blank"
-              style={{
-                color: "#10B981",
-                fontWeight: "700",
-                textDecoration: "none",
-              }}
-            >
-              📍Map
-            </a>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  const deleteItem = (id: string) => {
+    if (confirm("この履歴をアプリ内から削除しますか？")) {
+      const updated = history.filter((item) => item && item.id !== id);
+      saveHistory(updated);
+    }
+  };
 
   return (
     <div
@@ -250,6 +183,7 @@ export default function Home() {
         paddingBottom: "80px",
       }}
     >
+      {/* 背景画像 */}
       <div
         style={{
           position: "fixed",
@@ -283,16 +217,18 @@ export default function Home() {
                   }}
                 >
                   <div style={{ display: "flex", gap: "12px" }}>
-                    <img
-                      src={imageUrl!}
-                      style={{
-                        width: "100px",
-                        height: "100px",
-                        borderRadius: "12px",
-                        objectFit: "cover",
-                        border: "2px solid white",
-                      }}
-                    />
+                    {imageUrl && (
+                      <img
+                        src={imageUrl}
+                        style={{
+                          width: "80px",
+                          height: "80px",
+                          borderRadius: "12px",
+                          objectFit: "cover",
+                          border: "2px solid white",
+                        }}
+                      />
+                    )}
                     <div
                       style={{ flex: 1, fontSize: "11px", color: "#4B5563" }}
                     >
@@ -345,7 +281,7 @@ export default function Home() {
                 </div>
               )}
             </div>
-            {history.length > 0 && !hash && (
+            {history.length > 0 && history[0] && !hash && (
               <div style={{ marginTop: "20px" }}>
                 <h2
                   style={{
@@ -357,7 +293,43 @@ export default function Home() {
                 >
                   最新の記録
                 </h2>
-                <HistoryCard item={history[0]} />
+                <div
+                  style={{
+                    backgroundColor: "rgba(255, 255, 255, 0.7)",
+                    backdropFilter: "blur(10px)",
+                    borderRadius: "16px",
+                    padding: "10px",
+                    display: "flex",
+                    gap: "10px",
+                    border: "1px solid rgba(255, 255, 255, 0.4)",
+                  }}
+                >
+                  <img
+                    src={history[0].imageUrl}
+                    style={{
+                      width: "45px",
+                      height: "45px",
+                      objectFit: "cover",
+                      borderRadius: "8px",
+                    }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontWeight: "900",
+                        color: "#1F2937",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {history[0].title}
+                    </div>
+                    <div style={{ color: "#6B7280", fontSize: "10px" }}>
+                      {history[0].photoTimestamp}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
           </section>
@@ -369,20 +341,114 @@ export default function Home() {
             <h1 style={titleStyle}>履歴検索</h1>
             <input
               type="text"
-              placeholder="証拠を検索..."
+              placeholder="タイトルで検索..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               style={{ ...inputStyle, marginBottom: "15px" }}
             />
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              {history
-                .filter((item) =>
-                  item.title.toLowerCase().includes(searchQuery.toLowerCase())
-                )
-                .map((item) => (
-                  <HistoryCard key={item.id} item={item} />
-                ))}
-              {history.length === 0 && (
+            <div
+              style={{ display: "flex", flexDirection: "column", gap: "8px" }}
+            >
+              {history && history.length > 0 ? (
+                history
+                  .filter(
+                    (item) =>
+                      item &&
+                      item.title &&
+                      item.title
+                        .toLowerCase()
+                        .includes(searchQuery.toLowerCase())
+                  )
+                  .map((item) => (
+                    <div
+                      key={item.id}
+                      style={{
+                        backgroundColor: "rgba(255, 255, 255, 0.7)",
+                        backdropFilter: "blur(10px)",
+                        borderRadius: "16px",
+                        padding: "10px",
+                        display: "flex",
+                        gap: "10px",
+                        border: "1px solid rgba(255, 255, 255, 0.4)",
+                      }}
+                    >
+                      <img
+                        src={item.imageUrl}
+                        style={{
+                          width: "50px",
+                          height: "50px",
+                          objectFit: "cover",
+                          borderRadius: "8px",
+                        }}
+                      />
+                      <div style={{ flex: 1, minWidth: 0, fontSize: "11px" }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontWeight: "900",
+                              color: "#1F2937",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {item.title}
+                          </div>
+                          <button
+                            onClick={() => deleteItem(item.id)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor: "pointer",
+                            }}
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                        <div style={{ color: "#6B7280", fontSize: "10px" }}>
+                          {item.photoTimestamp}
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "12px",
+                            marginTop: "5px",
+                          }}
+                        >
+                          <a
+                            href={`https://suiscan.xyz/mainnet/tx/${item.txHash}`}
+                            target="_blank"
+                            style={{
+                              color: "#4F46E5",
+                              fontWeight: "700",
+                              textDecoration: "none",
+                            }}
+                          >
+                            SuiScan ↗
+                          </a>
+                          {item.location && (
+                            <a
+                              href={`https://www.google.com/maps?q=${item.location.lat},${item.location.lng}`}
+                              target="_blank"
+                              style={{
+                                color: "#10B981",
+                                fontWeight: "700",
+                                textDecoration: "none",
+                              }}
+                            >
+                              📍Map
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+              ) : (
                 <p
                   style={{
                     textAlign: "center",
@@ -446,6 +512,7 @@ export default function Home() {
               alignItems: "center",
               background: "none",
               border: "none",
+              width: "25%",
               color: activeTab === tab.id ? "#6366F1" : "#9CA3AF",
             }}
           >
