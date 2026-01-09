@@ -63,6 +63,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState("home");
   const [history, setHistory] = useState<ScanHistory[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isMasterPickerOpen, setIsMasterPickerOpen] = useState(false);
 
   // 撮影用ステート
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -397,7 +398,11 @@ export default function Home() {
   };
 
   // --- 照合処理（アプリ内優先 + アルバムは注意喚起）---
-  const handleVerify = async () => {
+  // --- 照合処理（既存ロジック完全維持 + 2ボタンサムネイル選択機能追加） ---
+  const handleVerify = async (
+    uiMode?: "ALBUM" | "MASTER",
+    selectedFromPicker?: ScanHistory
+  ) => {
     setVerifyResult(null);
     setVerifyError(false);
 
@@ -410,120 +415,64 @@ export default function Home() {
       if (!latestHistory || latestHistory.length === 0) {
         alert("⚠️ アプリ内に刻印履歴がありません。");
         setVerifyError(true);
+        setLoading(false);
         return;
       }
 
-      // ✅ 方針：基本は「アプリ内(master)の写真のみ」を選んで照合する
-      // オプションでアルバム照合も残す（ただし一致しない可能性を全面に警告）
-      const useAlbum = window.confirm(
-        [
-          "照合方法を選んでください。",
-          "",
-          "OK：アルバムから選んで照合（⚠️最適化等で一致しない可能性あり）",
-          "キャンセル：アプリ内に保存された写真（正本）から照合（推奨・確実）",
-        ].join("\n")
-      );
-
-      // ========= A) 推奨：アプリ内（masterUri）から照合 =========
-      if (!useAlbum) {
-        // masterUri が入っている履歴だけ対象（古い履歴でも動作は落とさない）
-        const candidates = latestHistory
-          .map((h, idx) => ({ h, idx }))
-          .filter(
-            ({ h }) =>
-              typeof (h as any).masterUri === "string" && !!(h as any).masterUri
-          );
-
-        if (candidates.length === 0) {
-          alert(
-            [
-              "⚠️ この端末の履歴には masterUri が保存されていないため、",
-              "「アプリ内の正本からの照合（推奨）」ができません。",
-              "",
-              "対処：新しい版（masterUri保存あり）で刻印した履歴から照合してください。",
-            ].join("\n")
-          );
-          setVerifyError(true);
-          return;
-        }
-
-        // 簡易UI：promptで選択（追加UIなしで機能落ちさせない）
-        const listText = candidates
-          .slice(0, 30) // 長すぎると辛いので上限（機能は落ちない）
-          .map(({ h, idx }, i) => `${i + 1}. ${h.title} / ${h.photoTimestamp}`)
-          .join("\n");
-
-        const pick = window.prompt(
-          [
-            "アプリ内の刻印履歴から照合対象を選んでください（番号入力）",
-            "",
-            listText,
-            "",
-            "例：1",
-          ].join("\n")
-        );
-
-        if (!pick) return;
-
-        const n = Number(pick);
-        if (
-          !Number.isFinite(n) ||
-          n < 1 ||
-          n > Math.min(candidates.length, 30)
-        ) {
-          alert("⚠️ 番号が不正です。");
-          setVerifyError(true);
-          return;
-        }
-
-        const chosen = candidates[n - 1].h;
+      // -----------------------------------------------------------------
+      // 1. UIから「MASTER（ProofBaseアルバム）」が選ばれた場合の処理（新規追加）
+      // -----------------------------------------------------------------
+      if (uiMode === "MASTER" && selectedFromPicker) {
+        const chosen = selectedFromPicker;
         const masterUri = (chosen as any).masterUri as string;
 
-        // 正本(masterUri)を読んでSHA
+        if (!masterUri) {
+          alert(
+            "⚠️ この履歴には masterUri が保存されていないため、正本照合ができません。"
+          );
+          setVerifyError(true);
+          setLoading(false);
+          return;
+        }
+
+        // 正本(masterUri)を読んでSHA計算
         const readFile = await Filesystem.readFile({ path: masterUri });
         const base64 = typeof readFile.data === "string" ? readFile.data : "";
-
         if (!base64) {
           alert("⚠️ 正本(master)の読み込みに失敗しました。");
           setVerifyError(true);
+          setLoading(false);
           return;
         }
 
         const bytes = base64ToBytes(base64);
         const currentImgId = await sha256Hex(bytes);
 
+        // ログ出力（既存仕様維持）
         console.log("[VERIFY:APP] masterUri=", masterUri);
         console.log("[VERIFY:APP] readFile length(base64)=", base64.length);
         console.log("[VERIFY:APP] bytes length=", bytes.length);
         console.log("[VERIFY:APP] currentImgId=", currentImgId);
         console.log("[VERIFY:APP] stored id=", chosen.id);
 
-        // 念のため：履歴内のidと一致しているか（設計的には一致するはず）
         if (currentImgId !== chosen.id?.toLowerCase()) {
-          alert(
-            [
-              "⚠️ 正本のSHAと履歴のSHAが一致しません。",
-              "（履歴が古い/移行前/ファイルが消えた可能性）",
-            ].join("\n")
-          );
+          alert("⚠️ 正本のSHAと履歴のSHAが一致しません。");
           setVerifyError(true);
+          setLoading(false);
           return;
         }
 
-        // 黄金レシピ再現
         const locStr = chosen.location
           ? `${chosen.location.lat.toFixed(5)},${chosen.location.lng.toFixed(
               5
             )}`
           : "location-none";
-
         const combined =
           currentImgId + "|" + chosen.photoTimestamp + "|" + locStr;
         const combinedBuffer = await crypto.subtle.digest(
           "SHA-256",
           new TextEncoder().encode(combined)
         );
-
         const verifyFinalHash =
           "0x" +
           Array.from(new Uint8Array(combinedBuffer))
@@ -540,11 +489,140 @@ export default function Home() {
           );
           setVerifyError(true);
         }
-
+        setLoading(false);
         return;
       }
 
-      // ========= B) オプション：アルバムから照合（不一致の可能性を警告） =========
+      // -----------------------------------------------------------------
+      // 2. 既存の「window.confirm」分岐ロジック（そのまま維持・uiMode未指定時）
+      // -----------------------------------------------------------------
+      let useAlbum = false;
+      if (!uiMode) {
+        useAlbum = window.confirm(
+          [
+            "照合方法を選んでください。",
+            "",
+            "OK：アルバムから選んで照合（⚠️最適化等で一致しない可能性あり）",
+            "キャンセル：アプリ内に保存された写真（正本）から照合（推奨・確実）",
+          ].join("\n")
+        );
+      } else {
+        // ボタンから直接「ALBUM」が押された場合
+        useAlbum = uiMode === "ALBUM";
+      }
+
+      // ========= A) 既存の「正本(masterUri)から照合」ロジック（window.prompt含む全て維持） =========
+      if (!useAlbum) {
+        const candidates = latestHistory
+          .map((h, idx) => ({ h, idx }))
+          .filter(
+            ({ h }) =>
+              typeof (h as any).masterUri === "string" && !!(h as any).masterUri
+          );
+
+        if (candidates.length === 0) {
+          alert(
+            [
+              "⚠️ この端末の履歴には masterUri が保存されていないため、",
+              "「アプリ内の正本からの照合（推奨）」ができません。",
+              "",
+              "対処：新しい版で刻印した履歴から照合してください。",
+            ].join("\n")
+          );
+          setVerifyError(true);
+          return;
+        }
+
+        const listText = candidates
+          .slice(0, 30)
+          .map(({ h, idx }, i) => `${i + 1}. ${h.title} / ${h.photoTimestamp}`)
+          .join("\n");
+        const pick = window.prompt(
+          [
+            "アプリ内の刻印履歴から照合対象を選んでください（番号入力）",
+            "",
+            listText,
+            "",
+            "例：1",
+          ].join("\n")
+        );
+        if (!pick) {
+          setLoading(false);
+          return;
+        }
+
+        const n = Number(pick);
+        if (
+          !Number.isFinite(n) ||
+          n < 1 ||
+          n > Math.min(candidates.length, 30)
+        ) {
+          alert("⚠️ 番号が不正です。");
+          setVerifyError(true);
+          return;
+        }
+
+        const chosen = candidates[n - 1].h;
+        const masterUri = (chosen as any).masterUri as string;
+        const readFile = await Filesystem.readFile({ path: masterUri });
+        const base64 = typeof readFile.data === "string" ? readFile.data : "";
+        if (!base64) {
+          alert("⚠️ 正本(master)の読み込みに失敗しました。");
+          setVerifyError(true);
+          return;
+        }
+
+        const bytes = base64ToBytes(base64);
+        const currentImgId = await sha256Hex(bytes);
+
+        console.log("[VERIFY:APP] masterUri=", masterUri);
+        console.log("[VERIFY:APP] readFile length(base64)=", base64.length);
+        console.log("[VERIFY:APP] bytes length=", bytes.length);
+        console.log("[VERIFY:APP] currentImgId=", currentImgId);
+        console.log("[VERIFY:APP] stored id=", chosen.id);
+
+        if (currentImgId !== chosen.id?.toLowerCase()) {
+          alert(
+            [
+              "⚠️ 正本のSHAと履歴のSHAが一致しません。",
+              "（履歴が古い/移行前/ファイルが消えた可能性）",
+            ].join("\n")
+          );
+          setVerifyError(true);
+          return;
+        }
+
+        const locStr = chosen.location
+          ? `${chosen.location.lat.toFixed(5)},${chosen.location.lng.toFixed(
+              5
+            )}`
+          : "location-none";
+        const combined =
+          currentImgId + "|" + chosen.photoTimestamp + "|" + locStr;
+        const combinedBuffer = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(combined)
+        );
+        const verifyFinalHash =
+          "0x" +
+          Array.from(new Uint8Array(combinedBuffer))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("")
+            .toLowerCase();
+
+        if (verifyFinalHash === chosen.hash.toLowerCase()) {
+          setVerifyResult(chosen);
+          alert(`✅ 証拠が確認されました！\nタイトル: ${chosen.title}`);
+        } else {
+          alert(
+            "⚠️ 画像は一致しましたが、メタデータ（時刻・位置）が異なります。"
+          );
+          setVerifyError(true);
+        }
+        return;
+      }
+
+      // ========= B) 既存の「アルバムから照合」ロジック（警告と再固定化含む全て維持） =========
       alert(
         [
           "⚠️ アルバム照合モード",
@@ -564,15 +642,15 @@ export default function Home() {
       console.log("[VERIFY:ALBUM] image.path=", image?.path);
       console.log("[VERIFY:ALBUM] image.webPath=", image?.webPath);
 
-      if (!image || !image.path) return;
+      if (!image || !image.path) {
+        setLoading(false);
+        return;
+      }
 
-      // アルバム画像を read → Dataに固定化 → その固定化bytesでSHA
       const verifyMasterName = `verify_${Date.now()}.jpg`;
-
       const src = await Filesystem.readFile({ path: image.path });
-      const base64 = typeof src.data === "string" ? src.data : "";
-
-      if (!base64) {
+      const base64Src = typeof src.data === "string" ? src.data : "";
+      if (!base64Src) {
         alert("⚠️ 画像データの読み込みに失敗しました。");
         setVerifyError(true);
         return;
@@ -580,7 +658,7 @@ export default function Home() {
 
       await Filesystem.writeFile({
         path: verifyMasterName,
-        data: base64,
+        data: base64Src,
         directory: Directory.Data,
         recursive: true,
       });
@@ -589,29 +667,27 @@ export default function Home() {
         directory: Directory.Data,
         path: verifyMasterName,
       });
-
-      const readFile = await Filesystem.readFile({ path: uriRes.uri });
+      const readFileFinal = await Filesystem.readFile({ path: uriRes.uri });
       const base64Master =
-        typeof readFile.data === "string" ? readFile.data : "";
-
+        typeof readFileFinal.data === "string" ? readFileFinal.data : "";
       if (!base64Master) {
         alert("⚠️ 照合用masterの読み込みに失敗しました。");
         setVerifyError(true);
         return;
       }
 
-      const bytes = base64ToBytes(base64Master);
-      const currentImgId = await sha256Hex(bytes);
+      const bytesFinal = base64ToBytes(base64Master);
+      const currentImgIdFinal = await sha256Hex(bytesFinal);
 
       console.log(
         "[VERIFY:ALBUM] readFile length(base64)=",
         base64Master.length
       );
-      console.log("[VERIFY:ALBUM] bytes length=", bytes.length);
-      console.log("[VERIFY:ALBUM] currentImgId=", currentImgId);
+      console.log("[VERIFY:ALBUM] bytes length=", bytesFinal.length);
+      console.log("[VERIFY:ALBUM] currentImgId=", currentImgIdFinal);
 
       const match = latestHistory.find(
-        (item) => item && item.id?.toLowerCase() === currentImgId
+        (item) => item && item.id?.toLowerCase() === currentImgIdFinal
       );
 
       if (!match) {
@@ -622,25 +698,23 @@ export default function Home() {
         return;
       }
 
-      const locStr = match.location
+      const locStrMatch = match.location
         ? `${match.location.lat.toFixed(5)},${match.location.lng.toFixed(5)}`
         : "location-none";
-
-      const combined = currentImgId + "|" + match.photoTimestamp + "|" + locStr;
-
-      const combinedBuffer = await crypto.subtle.digest(
+      const combinedMatch =
+        currentImgIdFinal + "|" + match.photoTimestamp + "|" + locStrMatch;
+      const combinedBufferMatch = await crypto.subtle.digest(
         "SHA-256",
-        new TextEncoder().encode(combined)
+        new TextEncoder().encode(combinedMatch)
       );
-
-      const verifyFinalHash =
+      const verifyFinalHashMatch =
         "0x" +
-        Array.from(new Uint8Array(combinedBuffer))
+        Array.from(new Uint8Array(combinedBufferMatch))
           .map((b) => b.toString(16).padStart(2, "0"))
           .join("")
           .toLowerCase();
 
-      if (verifyFinalHash === match.hash.toLowerCase()) {
+      if (verifyFinalHashMatch === match.hash.toLowerCase()) {
         setVerifyResult(match);
         alert(`✅ 証拠が確認されました！\nタイトル: ${match.title}`);
       } else {
@@ -995,17 +1069,49 @@ export default function Home() {
         )}
 
         {/* --- VERIFY タブ --- */}
+        {/* --- VERIFY タブ --- */}
         {activeTab === "verify" && (
           <section>
             <h1 style={titleStyle}>証拠照合</h1>
             <div style={cardStyle}>
-              <button
-                onClick={handleVerify}
-                disabled={loading}
-                style={btnStyle("#10B981", "#FFF")}
+              <p
+                style={{
+                  fontSize: "12px",
+                  color: "#666",
+                  marginBottom: "15px",
+                  textAlign: "center",
+                }}
               >
-                🔍 画像を選択して鑑定
-              </button>
+                照合方法を選択してください。原本（アプリ内）からの照合を推奨します。
+              </p>
+
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "12px",
+                }}
+              >
+                {/* ボタン1：アプリ内の正本から選ぶ */}
+                <button
+                  onClick={() => setIsMasterPickerOpen(true)}
+                  disabled={loading}
+                  style={btnStyle("#6366F1", "#FFF")}
+                >
+                  🔒 ProofBaseアルバムから照合
+                </button>
+
+                {/* ボタン2：外部アルバムから選ぶ */}
+                <button
+                  onClick={() => handleVerify("ALBUM")}
+                  disabled={loading}
+                  style={btnStyle("#9CA3AF", "#FFF")}
+                >
+                  🖼️ アルバムから照合
+                </button>
+              </div>
+
+              {/* 照合成功時の表示（既存機能を維持） */}
               {verifyResult && (
                 <div style={{ marginTop: "15px", textAlign: "center" }}>
                   <div
@@ -1025,6 +1131,8 @@ export default function Home() {
                   </button>
                 </div>
               )}
+
+              {/* 照合失敗時の表示（既存機能を維持） */}
               {verifyError && (
                 <div
                   style={{
@@ -1037,6 +1145,114 @@ export default function Home() {
                 </div>
               )}
             </div>
+
+            {/* ★ProofBaseアルバム・サムネイル選択モーダル */}
+            {isMasterPickerOpen && (
+              <div
+                style={{
+                  position: "fixed",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  backgroundColor: "rgba(0,0,0,0.85)",
+                  zIndex: 1000,
+                  padding: "20px",
+                  display: "flex",
+                  flexDirection: "column",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    color: "#FFF",
+                    marginBottom: "15px",
+                  }}
+                >
+                  <span style={{ fontWeight: "bold" }}>
+                    正本を選択（ProofBaseアルバム）
+                  </span>
+                  <button
+                    onClick={() => setIsMasterPickerOpen(false)}
+                    style={{
+                      fontSize: "24px",
+                      color: "#FFF",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                    }}
+                  >
+                    &times;
+                  </button>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(3, 1fr)",
+                    gap: "8px",
+                    overflowY: "auto",
+                    paddingBottom: "100px",
+                  }}
+                >
+                  {history
+                    .filter((h) => (h as any).masterUri)
+                    .map((item, idx) => (
+                      <div
+                        key={item.id + idx}
+                        onClick={() => {
+                          setIsMasterPickerOpen(false);
+                          handleVerify("MASTER", item);
+                        }}
+                        style={{
+                          position: "relative",
+                          aspectRatio: "1 / 1",
+                          backgroundColor: "#333",
+                          borderRadius: "8px",
+                          overflow: "hidden",
+                          border: "1px solid #444",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <img
+                          src={item.imageUrl}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                          }}
+                          alt={item.title}
+                        />
+                        <div
+                          style={{
+                            position: "absolute",
+                            bottom: 0,
+                            left: 0,
+                            right: 0,
+                            backgroundColor: "rgba(0,0,0,0.6)",
+                            padding: "2px 4px",
+                          }}
+                        >
+                          <p
+                            style={{
+                              fontSize: "9px",
+                              color: "#FFF",
+                              margin: 0,
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {item.title}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
           </section>
         )}
       </div>
