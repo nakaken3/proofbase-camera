@@ -178,40 +178,66 @@ export default function Home() {
   // }
 
   // --- 撮影・選択処理（キャンセル対応・位置情報・物理コピー） ---
-  const takePhoto = async () => {
+  // --- 撮影・選択処理（3ボタン対応・物理原本固定・GPS制御） ---
+  const takePhoto = async (
+    mode: "CAMERA_WITH_GPS" | "CAMERA_ONLY" | "ALBUM" | any
+  ) => {
     try {
       setLoading(true);
 
+      // 1. ソースと位置情報取得の要否を決定
+      let source = CameraSource.Prompt; // デフォルト（互換性用）
+      if (mode === "CAMERA_WITH_GPS" || mode === "CAMERA_ONLY")
+        source = CameraSource.Camera;
+      if (mode === "ALBUM") source = CameraSource.Photos;
+
+      // 2. カメラ/アルバム起動
       const image = await Camera.getPhoto({
         quality: 100,
         resultType: CameraResultType.Uri,
         // ✅ 方針：撮影はアルバムに残さない（正本はアプリ領域）
-        //    ただし、アルバムから選択して刻印する導線は CameraSource.Prompt で維持される
         saveToGallery: false,
-        source: CameraSource.Prompt,
+        source: source,
       });
 
-      if (!image || !image.path) return;
+      if (!image || !image.path) {
+        setLoading(false);
+        return;
+      }
 
       const imgSource = (image as any).source;
       const exifData = (image as any).exif;
 
-      // coords は state の反映が遅れるので、alert 用にローカルも持つ
+      // coords は state の反映が遅れるので、ローカルも持つ
       let nextCoords: { lat: number; lng: number } | null = null;
       setCoords(null);
 
-      // 位置情報
+      // --- 3. 位置情報取得ロジック（モードに合わせて最適化） ---
       if (imgSource === "Camera") {
-        try {
-          const pos = await Geolocation.getCurrentPosition({
-            timeout: 5000,
-            enableHighAccuracy: true,
-          });
-          nextCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-          setCoords(nextCoords);
-        } catch {
+        if (mode === "CAMERA_WITH_GPS") {
+          // 【撮影＋位置情報】の場合のみ GPS を動かす
+          try {
+            const pos = await Geolocation.getCurrentPosition({
+              timeout: 5000,
+              enableHighAccuracy: true,
+            });
+            nextCoords = {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+            };
+            setCoords(nextCoords);
+          } catch {
+            console.warn("GPS有効ですが取得に失敗しました。");
+            nextCoords = null;
+            setCoords(null);
+          }
+        } else {
+          // 【撮影のみ】の場合は GPS 取得をスキップ（高速！）
           nextCoords = null;
           setCoords(null);
+          console.log(
+            "DEBUG: CAMERA_ONLY モードのためGPS取得をスキップしました"
+          );
         }
       } else if (imgSource === "Photos") {
         // アルバムの場合：ExifのGPSがあれば採用、なければ null
@@ -230,15 +256,16 @@ export default function Home() {
       // 撮影直後はOS処理が残ることがあるので少し待つ
       await new Promise((r) => setTimeout(r, 800));
 
-      // ✅ 物理固定マスター作成（read → write）
+      // ✅ 4. 物理固定マスター作成（原本をアプリ領域に隔離）
       const masterName = `proof_${Date.now()}.jpg`;
 
-      // image.path から base64 を読む（content:// でも読める端末が多い）
+      // image.path から base64 を読む
       const src = await Filesystem.readFile({ path: image.path });
       const base64 = typeof src.data === "string" ? src.data : "";
 
       if (!base64) {
         alert("⚠️ 画像データの読み込みに失敗しました。");
+        setLoading(false);
         return;
       }
 
@@ -256,15 +283,16 @@ export default function Home() {
         path: masterName,
       });
 
-      // 日時（Exif必須ガード）
+      // --- 5. 日時ガード（以前の機能を完全維持） ---
       let capturedTime = exifData?.DateTimeOriginal || exifData?.DateTime;
       if (imgSource === "Photos" && !capturedTime) {
         alert("⚠️ アルバムから選択する場合、撮影日時（Exif）が必須です。");
+        setLoading(false);
         return;
       }
       if (!capturedTime) capturedTime = new Date().toLocaleString();
 
-      // ステート更新
+      // --- 6. ステート更新 ---
       setImageUrl(image.webPath ?? null); // 表示用（プレビュー）
       setHash(uriRes.uri); // ✅ 固定マスターのURI（正本）
       setPhotoTime(capturedTime);
@@ -819,14 +847,69 @@ export default function Home() {
             {/* メインカードエリア */}
             <div style={{ ...cardStyle, marginBottom: "20px" }}>
               {!hash ? (
-                /* 1. 撮影前のボタン表示 */
-                <button
-                  onClick={takePhoto}
-                  disabled={loading}
-                  style={btnStyle("#6366F1", "#FFF")}
+                /* 1. 撮影・選択ボタンエリア（3ボタン構成に刷新） */
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "12px",
+                  }}
                 >
-                  {loading ? "準備中..." : "📸 撮影・選択を開始"}
-                </button>
+                  {/* 最優先：撮影+位置情報 */}
+                  <button
+                    onClick={() => takePhoto("CAMERA_WITH_GPS")}
+                    disabled={loading}
+                    style={{
+                      ...btnStyle(
+                        "linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)",
+                        "#FFF"
+                      ),
+                      height: "56px",
+                      fontSize: "16px",
+                    }}
+                  >
+                    {loading ? "準備中..." : "📸 撮影 ＋ 📍位置情報"}
+                  </button>
+
+                  <div style={{ display: "flex", gap: "10px" }}>
+                    {/* カメラのみ（GPSをスキップして高速起動） */}
+                    <button
+                      onClick={() => takePhoto("CAMERA_ONLY")}
+                      disabled={loading}
+                      style={{
+                        ...btnStyle("#10B981", "#FFF"),
+                        flex: 1,
+                        fontSize: "14px",
+                      }}
+                    >
+                      📷 撮影のみ
+                    </button>
+
+                    {/* アルバムから選択 */}
+                    <button
+                      onClick={() => takePhoto("ALBUM")}
+                      disabled={loading}
+                      style={{
+                        ...btnStyle("#9CA3AF", "#FFF"),
+                        flex: 1,
+                        fontSize: "14px",
+                      }}
+                    >
+                      🖼️ アルバム
+                    </button>
+                  </div>
+
+                  <p
+                    style={{
+                      fontSize: "10px",
+                      color: "#6B7280",
+                      textAlign: "center",
+                      marginTop: "4px",
+                    }}
+                  >
+                    ※「撮影のみ」はGPSを起動しないため素早く起動します。
+                  </p>
+                </div>
               ) : (
                 /* 2. 撮影後のプレビュー表示（ここが真っ白になっていた箇所） */
                 <div
