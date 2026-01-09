@@ -16,6 +16,7 @@
     "@capacitor/core": "^7.0.0",
     "@capacitor/filesystem": "^7.0.0",
     "@capacitor/geolocation": "^7.1.7",
+    "@capacitor/share": "^7.0.3",
     "@mysten/sui": "^1.45.2",
     "crypto-js": "latest",
     "next": "latest",
