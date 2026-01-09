@@ -6,11 +6,13 @@ import { Geolocation } from "@capacitor/geolocation";
 import { Share } from "@capacitor/share";
 import { suiAnchor } from "../src/lib/sui";
 import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Browser } from "@capacitor/browser";
 
 // --- 型定義 ---
 interface ScanHistory {
   id: string;
   title: string;
+  comment?: string; // ✅ 追加：証拠の詳細やメモ（任意入力）
   photoTimestamp: string;
   anchorTimestamp: string;
   hash: string;
@@ -64,6 +66,7 @@ export default function Home() {
   const [history, setHistory] = useState<ScanHistory[]>([]);
   const [loading, setLoading] = useState(false);
   const [isMasterPickerOpen, setIsMasterPickerOpen] = useState(false);
+  const [comment, setComment] = useState(""); // 本文用
 
   // 撮影用ステート
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -164,6 +167,17 @@ export default function Home() {
       .toLowerCase();
   };
 
+  // メニュー内のボタンのクリックイベント
+  const openPrivacyPolicy = async () => {
+    await Browser.open({
+      url: "https://sites.google.com/view/proofbase-camera-privacy",
+    });
+  };
+  const openLegal = async () => {
+    await Browser.open({
+      url: "https://sites.google.com/view/proofbase-camera-legal",
+    });
+  };
   // ※ ScanHistory に masterUri を足すのが推奨です（既存データも壊さない）
   // interface ScanHistory {
   //   id: string;
@@ -296,12 +310,13 @@ export default function Home() {
       setImageUrl(image.webPath ?? null); // 表示用（プレビュー）
       setHash(uriRes.uri); // ✅ 固定マスターのURI（正本）
       setPhotoTime(capturedTime);
-
+      /*
       alert(
         `【取得完了】\n位置情報: ${
           nextCoords ? "取得済み" : "なし(location-none)"
         }`
       );
+      */
     } catch (e: any) {
       console.log("User cancelled or error:", e?.message);
     } finally {
@@ -310,8 +325,8 @@ export default function Home() {
   };
 
   // --- 刻印処理（省略・機能落ちなし全文） ---
+  // --- 刻印処理（機能落ちなし・コメント保存・txHash整合性確保） ---
   const recordToSui = async () => {
-    // 【機能維持】基本バリデーション
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
       alert("⚠️ タイトルを入力してください。証拠の管理に必要です。");
@@ -325,7 +340,6 @@ export default function Home() {
     const rawSaved = localStorage.getItem("proofbase_history");
     const currentHistory: ScanHistory[] = rawSaved ? JSON.parse(rawSaved) : [];
 
-    // 【機能維持】タイトル重複チェック
     if (currentHistory.some((item) => item && item.title === trimmedTitle)) {
       alert("⚠️ 同じタイトルの証拠が既に存在します。");
       return;
@@ -334,10 +348,8 @@ export default function Home() {
     try {
       setLoading(true);
 
-      // ✅ 【原本(アプリ領域 master)から指紋生成】
       const readFile = await Filesystem.readFile({ path: hash });
       const base64 = typeof readFile.data === "string" ? readFile.data : "";
-
       if (!base64) {
         alert("⚠️ 正本(master)の読み込みに失敗しました。");
         return;
@@ -346,12 +358,6 @@ export default function Home() {
       const bytes = base64ToBytes(base64);
       const currentId = await sha256Hex(bytes);
 
-      console.log("[RECORD] masterPath(hash)=", hash);
-      console.log("[RECORD] readFile length(base64)=", base64.length);
-      console.log("[RECORD] bytes length=", bytes.length);
-      console.log("[RECORD] currentId=", currentId);
-
-      // 【機能維持】画像重複チェック
       if (
         currentHistory.some(
           (item) => item && item.id?.toLowerCase() === currentId
@@ -364,7 +370,6 @@ export default function Home() {
         return;
       }
 
-      // 【機能維持】チケットチェック
       if (remainingCredits <= 0) {
         alert("🎟️ チケット不足です。設定メニューから追加してください。");
         setIsMenuOpen(true);
@@ -372,17 +377,14 @@ export default function Home() {
         return;
       }
 
-      // 黄金レシピ（位置情報がない場合は location-none）
       const locStr = coords
         ? `${coords.lat.toFixed(5)},${coords.lng.toFixed(5)}`
         : "location-none";
-
       const combined = currentId + "|" + photoTime + "|" + locStr;
       const combinedBuffer = await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(combined)
       );
-
       const finalSuiHash =
         "0x" +
         Array.from(new Uint8Array(combinedBuffer))
@@ -390,21 +392,20 @@ export default function Home() {
           .join("")
           .toLowerCase();
 
-      // Sui刻印
+      // Sui刻印（Mainnet実行）
       if (!suiAnchor) throw new Error("Sui接続エラー");
       const result = await suiAnchor.anchorSha256(finalSuiHash);
 
-      // 履歴保存（全情報を保持）
       const newEntry: ScanHistory = {
         id: currentId,
         title: trimmedTitle,
+        comment: comment.trim(), // コメント保存
         photoTimestamp: photoTime,
         anchorTimestamp: new Date().toLocaleString(),
         hash: finalSuiHash,
-        txHash: result.txHash,
+        txHash: result.txHash, // SuiScanで表示するための重要なID
         imageUrl: imageUrl,
         location: coords || undefined,
-        // ✅ 照合の主役：アプリ領域の正本URI
         masterUri: hash,
       };
 
@@ -412,11 +413,11 @@ export default function Home() {
       setHistory(updatedHistory);
       localStorage.setItem("proofbase_history", JSON.stringify(updatedHistory));
 
-      // クリーンアップ
       setRemainingCredits((prev) => prev - 1);
       setHash(null);
       setImageUrl(null);
       setTitle("");
+      setComment("");
       alert("✅ 刻印が完了しました！");
     } catch (e: any) {
       alert("🚫 実行エラー: " + e.message);
@@ -961,10 +962,24 @@ export default function Home() {
 
                   <input
                     type="text"
-                    placeholder="証拠のタイトルを入力..."
+                    placeholder="タイトル（30文字以内推奨）"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     style={inputStyle}
+                  />
+
+                  {/* --- 追加：コメント入力欄 --- */}
+                  <textarea
+                    placeholder="証拠の詳細やコメントを入力..."
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    style={{
+                      ...inputStyle,
+                      height: "80px",
+                      padding: "10px",
+                      marginTop: "10px",
+                      resize: "none", // ユーザーがサイズ変更できないように固定
+                    }}
                   />
 
                   <div style={{ display: "flex", gap: "10px" }}>
@@ -1206,6 +1221,59 @@ export default function Home() {
                   >
                     ✅ 本物と認定されました
                   </div>
+                  {/* --- 【追加】照合済みデータのプレビュー --- */}
+                  {/* タイトル表示 */}
+                  <div
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: "900",
+                      color: "#111827",
+                      marginBottom: "10px",
+                      padding: "0 10px",
+                    }}
+                  >
+                    {verifyResult.title}
+                  </div>
+
+                  {/* サムネイル画像（120px固定） */}
+                  <div
+                    style={{
+                      width: "120px",
+                      height: "120px",
+                      margin: "0 auto 10px",
+                      borderRadius: "16px",
+                      overflow: "hidden",
+                      border: "1px solid #E5E7EB",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+                    }}
+                  >
+                    <img
+                      src={verifyResult.imageUrl}
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                      }}
+                      alt="Verified Thumbnail"
+                    />
+                  </div>
+
+                  {/* 撮影日時（小さく補足） */}
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      color: "#6B7280",
+                      marginBottom: "15px",
+                      backgroundColor: "#F3F4F6",
+                      display: "inline-block",
+                      padding: "4px 10px",
+                      borderRadius: "20px",
+                    }}
+                  >
+                    🕒 撮影: {verifyResult.photoTimestamp}
+                  </div>
+                  {/* -------------------------------------- */}
+
                   <button
                     onClick={() => setSelectedCert(verifyResult)}
                     style={btnStyle("#6366F1", "#FFF")}
@@ -1437,6 +1505,27 @@ export default function Home() {
                 <div>
                   <strong>タイトル:</strong> {selectedCert.title}
                 </div>
+
+                {/* 証明書モーダル内などの表示例 */}
+                {selectedCert.comment && (
+                  <div
+                    style={{
+                      marginTop: "10px",
+                      padding: "10px",
+                      backgroundColor: "#F9FAFB",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                      color: "#374151",
+                      whiteSpace: "pre-wrap", // 改行を反映させる
+                    }}
+                  >
+                    <div style={{ fontWeight: "bold", marginBottom: "4px" }}>
+                      💬 現場メモ
+                    </div>
+                    {selectedCert.comment}
+                  </div>
+                )}
+
                 <div>
                   <strong>撮影日時:</strong> {selectedCert.photoTimestamp}
                 </div>
@@ -1676,12 +1765,48 @@ export default function Home() {
               {/* 購入セクション */}
               <div>
                 <button
-                  onClick={() => {
-                    localStorage.clear();
-                    alert(
-                      "履歴をリセットしました。アプリを再起動してください。"
-                    );
-                    window.location.reload();
+                  onClick={async () => {
+                    // ユーザーに最終確認
+                    if (
+                      !confirm(
+                        "履歴と保存された画像もすべて削除されます。よろしいですか？"
+                      )
+                    )
+                      return;
+
+                    try {
+                      // --- 1. テキストデータのクリア ---
+                      localStorage.clear();
+
+                      // --- 2. 画像ファイルのクリア ---
+                      // 保存しているディレクトリ（例: 'photos'）ごと削除して再作成する、
+                      // または中身をループして削除します。
+                      const directoryPath = "photos"; // あなたが画像を保存しているフォルダ名
+
+                      // ディレクトリごと削除する場合（中身が空でない場合は recursive: true が必要）
+                      await Filesystem.rmdir({
+                        path: directoryPath,
+                        directory: Directory.Data, // または Directory.Documents (保存時に指定したもの)
+                        recursive: true,
+                      }).catch((e) =>
+                        console.log("ディレクトリが存在しないか、削除済みです")
+                      );
+
+                      // 削除後、フォルダを再作成しておく（エラー防止）
+                      await Filesystem.mkdir({
+                        path: directoryPath,
+                        directory: Directory.Data,
+                        recursive: true,
+                      });
+
+                      alert(
+                        "画像を含むすべてのデータをリセットしました。アプリを再起動します。"
+                      );
+                      window.location.reload();
+                    } catch (error) {
+                      console.error("リセット中にエラーが発生しました", error);
+                      alert("一部のデータの削除に失敗しました。");
+                    }
                   }}
                   style={btnStyle("#EF4444", "#FFF")}
                 >
@@ -1747,7 +1872,9 @@ export default function Home() {
                     alignItems: "center",
                   }}
                 >
-                  📄 利用規約 <span>›</span>
+                  <div onClick={openLegal} style={{ cursor: "pointer" }}>
+                    📄 利用規約 <span>›</span>
+                  </div>
                 </div>
                 <div
                   style={{
@@ -1758,7 +1885,12 @@ export default function Home() {
                     alignItems: "center",
                   }}
                 >
-                  🔒 プライバシーポリシー <span>›</span>
+                  <div
+                    onClick={openPrivacyPolicy}
+                    style={{ cursor: "pointer" }}
+                  >
+                    🔒 プライバシーポリシー <span>›</span>
+                  </div>
                 </div>
               </div>
             </div>
